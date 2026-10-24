@@ -410,6 +410,23 @@ export function incrementWebhookDeadLettersTotal(): void {
   }
 }
 
+const webhookSubscriptionStatusStore: Record<string, number> = { active: 0, degraded: 0, suspended: 0 };
+export function setWebhookSubscriptionStatusCounts(counts: Record<string, number>): void {
+  Object.assign(webhookSubscriptionStatusStore, { active: 0, degraded: 0, suspended: 0 }, counts);
+}
+export function getWebhookSubscriptionStatusCounts(): Record<string, number> {
+  return { ...webhookSubscriptionStatusStore };
+}
+
+/** Lifetime count of deliveries skipped because a subscription's circuit was open (#1512). */
+let webhookCircuitOpenTotal = 0;
+export function incrementWebhookCircuitOpenTotal(): void {
+  webhookCircuitOpenTotal += 1;
+}
+export function getWebhookCircuitOpenTotal(): number {
+  return webhookCircuitOpenTotal;
+}
+
 /** Increment webhook_retry_success_total counter. */
 export function incrementWebhookRetrySuccessTotal(): void {
   webhookCountersStore.retrySuccessTotal += 1;
@@ -896,6 +913,14 @@ export function serializeMetrics(extras: SerializeMetricsExtras = {}): string {
   lines.push('# HELP scout_off_webhook_dead_letters_inserted_total Lifetime webhook dead-letter inserts');
   lines.push('# TYPE scout_off_webhook_dead_letters_inserted_total counter');
   lines.push(`scout_off_webhook_dead_letters_inserted_total ${webhook.deadLettersTotal}`);
+  lines.push('# HELP scout_off_webhook_subscriptions Webhook subscriptions by health status');
+  lines.push('# TYPE scout_off_webhook_subscriptions gauge');
+  for (const [status, count] of Object.entries(getWebhookSubscriptionStatusCounts())) {
+    lines.push(`scout_off_webhook_subscriptions{status="${status}"} ${count}`);
+  }
+  lines.push('# HELP scout_off_webhook_circuit_open_total Deliveries skipped because the subscription circuit was open');
+  lines.push('# TYPE scout_off_webhook_circuit_open_total counter');
+  lines.push(`scout_off_webhook_circuit_open_total ${webhookCircuitOpenTotal}`);
   lines.push('# HELP scout_off_webhook_retry_success_total Successful dead-letter auto-retries');
   lines.push('# TYPE scout_off_webhook_retry_success_total counter');
   lines.push(`scout_off_webhook_retry_success_total ${webhook.retrySuccessTotal}`);

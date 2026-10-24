@@ -73,6 +73,8 @@ Histograms expose the usual `_bucket{le=…}`, `_sum` and `_count` series.
 | `webhook_delivery_total` | counter | `status` (`success`, `failure`, `dead_letter`) | Webhook delivery outcomes |
 | `scout_off_webhook_dead_letters_total` | gauge | `subscription_id` | Current dead-letter queue depth per subscription (#1131). Despite the `_total` suffix this is a gauge |
 | `scout_off_webhook_dead_letters_inserted_total` | counter | — | Lifetime dead-letter inserts |
+| `scout_off_webhook_subscriptions` | gauge | `status` | Webhook subscriptions by health status (`active`, `degraded`, `suspended`) |
+| `scout_off_webhook_circuit_open_total` | counter | — | Deliveries skipped because the subscription's circuit breaker was open |
 | `scout_off_webhook_retry_success_total` | counter | — | Dead letters successfully redelivered by the automatic retry job |
 
 ### Security and streaming

@@ -2,11 +2,19 @@ import fetch from 'node-fetch';
 import crypto from 'crypto';
 import { listWebhookSubscriptions, insertWebhookDeadLetter, insertWebhookDelivery, WebhookSubscription } from '../db';
 import { logger } from '../utils/logger';
-import { recordWebhookDelivery, incrementWebhookDeadLettersTotal } from '../middleware/metrics';
+import { recordWebhookDelivery, incrementWebhookDeadLettersTotal, incrementWebhookCircuitOpenTotal } from '../middleware/metrics';
 import { context, propagation, trace, SpanStatusCode } from '@opentelemetry/api';
 import config from '../config';
 import { getCorrelationId } from '../utils/requestContext';
 import { getVersionInfo } from '../version';
+import { CircuitBreakerOpenError } from '../utils/circuitBreaker';
+import {
+  CIRCUIT_OPEN_REASON,
+  getWebhookBreaker,
+  isSuspended,
+  recordDeliveryFailure,
+  recordDeliverySuccess,
+} from './webhookHealth';
 
 /**
  * Generate a unique, stable delivery identifier for a webhook event.
@@ -258,7 +266,8 @@ const RETRY_OPTIONS = { retries: 3, baseDelayMs: 500, maxDelayMs: 5000 };
  * delivery failure so a slow/broken subscriber can't break the caller.
  */
 export async function dispatchEventWebhook(eventType: string, payload: unknown): Promise<void> {
-  const subscriptions = listWebhookSubscriptions();
+  // Suspended subscriptions receive no deliveries (#1512).
+  const subscriptions = listWebhookSubscriptions().filter((s) => !isSuspended(s));
   if (subscriptions.length === 0) return;
 
   // Generate a stable delivery ID once for this logical event.
@@ -322,20 +331,28 @@ async function deliverToSubscription(
 ): Promise<void> {
   const startedAt = Date.now();
   try {
-    await postWebhookWithRetry(subscription.url, body, {
-      ...RETRY_OPTIONS,
-      secret: subscription.secret,
-      subscription,
-      eventType,
-      deliveryId,
-    });
+    await getWebhookBreaker(subscription.id).execute(() =>
+      postWebhookWithRetry(subscription.url, body, {
+        ...RETRY_OPTIONS,
+        secret: subscription.secret,
+        subscription,
+        eventType,
+        deliveryId,
+      }),
+    );
+    recordDeliverySuccess(subscription);
     recordWebhookDelivery('success');
     recordDeliveryHistory(subscription, eventType, deliveryId, {
       status: 'success',
       latencyMs: Date.now() - startedAt,
     });
   } catch (err) {
-    const failureReason = err instanceof Error ? err.message : String(err);
+    // Open circuit: no HTTP call was made, so dead-letter immediately without
+    // burning retries or counting another failure against the endpoint (#1512).
+    const circuitOpen = err instanceof CircuitBreakerOpenError;
+    const failureReason = circuitOpen ? CIRCUIT_OPEN_REASON : err instanceof Error ? err.message : String(err);
+    if (circuitOpen) incrementWebhookCircuitOpenTotal();
+    else await recordDeliveryFailure(subscription);
     logger.warn(
       `[webhooks] delivery exhausted retries — subscriptionId=${subscription.id} url=${subscription.url} eventType=${eventType} reason=${failureReason} delivery_id=${deliveryId}`
     );
@@ -346,14 +363,14 @@ async function deliverToSubscription(
       payload: JSON.stringify(body),
       deliveryId,
       failureReason,
-      attempts: RETRY_OPTIONS.retries,
+      attempts: circuitOpen ? 0 : RETRY_OPTIONS.retries,
     });
     incrementWebhookDeadLettersTotal();
     recordWebhookDelivery('dead_letter');
     recordDeliveryHistory(subscription, eventType, deliveryId, {
       status: 'failure',
       errorMessage: failureReason,
-      attemptCount: RETRY_OPTIONS.retries,
+      attemptCount: circuitOpen ? 0 : RETRY_OPTIONS.retries,
       latencyMs: Date.now() - startedAt,
     });
   }

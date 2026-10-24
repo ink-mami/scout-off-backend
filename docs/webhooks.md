@@ -617,6 +617,36 @@ Metrics (see `GET /metrics`):
 - `scout_off_webhook_dead_letters_inserted_total` — lifetime inserts
 - `scout_off_webhook_retry_success_total` — successful auto-retries
 
+## Endpoint health, circuit breaking and suspension
+
+Each subscription tracks its own health (columns added in migration 038):
+`status` (`active` | `degraded` | `suspended`), `consecutiveFailures`,
+`lastFailureAt`, `lastSuccessAt`, `suspendedAt` and `suspendedReason`. These are
+returned by `GET /api/scouts/:wallet/webhooks`.
+
+- **Circuit breaker.** A breaker per subscription opens after
+  `WEBHOOK_BREAKER_FAILURE_THRESHOLD` (default 5) consecutive exhausted
+  deliveries. While open (`WEBHOOK_BREAKER_RESET_TIMEOUT_MS`, default 60s) no HTTP
+  call is made: the delivery is dead-lettered immediately with
+  `failure_reason = circuit_open` (0 attempts) and
+  `scout_off_webhook_circuit_open_total` is incremented. After the timeout one
+  probe is allowed through.
+- **Suspension.** After `WEBHOOK_SUSPEND_AFTER_FAILURES` (default 50) consecutive
+  failed deliveries, or 5+ consecutive failures spanning more than
+  `WEBHOOK_SUSPEND_AFTER_MS` (default 24h), the subscription becomes `suspended`.
+  Suspended subscriptions receive no deliveries and the dead-letter retry job
+  leaves their rows pending without consuming retries. A success resets the
+  streak and returns a `degraded` subscription to `active`.
+- **Notification.** Suspension writes a `webhook_subscription_suspended` audit
+  event and, if the scout owns another healthy subscription, sends it a
+  `webhook.suspended` event (`subscriptionId`, `url`, `reason`, `suspendedAt`).
+- **Re-enable.** `POST /api/scouts/:wallet/webhooks/:id/reactivate` (owner) or
+  `POST /api/admin/webhooks/:id/reactivate` (admin) sends a test ping first and
+  reactivates only if it succeeds; otherwise it returns `502` and the
+  subscription stays suspended.
+- **Metrics.** `scout_off_webhook_subscriptions{status}` and
+  `scout_off_webhook_circuit_open_total`.
+
 ## Secret Rotation
 
 ### At-rest encryption (#686)

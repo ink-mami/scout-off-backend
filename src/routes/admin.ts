@@ -56,6 +56,8 @@ import { validatorWalletSchema } from '../validators/admin';
 import { emptyBodySchema, ignoredBodySchema } from '../validators/emptyBody';
 import config from '../config';
 import { getRetentionDryRun } from '../controllers/retentionController';
+import { getEncryptionStatusEndpoint } from '../controllers/encryptionController';
+import { adminReactivateWebhook } from '../controllers/webhookSubscriptionController';
 
 /** Stricter rate limit for bulk import — 5 requests per minute per IP (relaxed in tests). */
 const importRateLimit = rateLimit({
@@ -795,6 +797,22 @@ router.route('/webhooks/:id/replay')
   .all(methodNotAllowed(['POST']));
 
 /**
+ * POST /api/admin/webhooks/:id/reactivate
+ *
+ * Reactivate a suspended webhook subscription (#1512). Sends a test ping first
+ * and reactivates only if it succeeds.
+ *
+ * @param id {integer} - Webhook subscription row ID
+ * @response 200 { success: true, data: { id, url, status: 'active' } }
+ * @response 404 { success: false, error: string } - Subscription not found
+ * @response 502 { success: false, error: string } - Test ping failed
+ * @auth Bearer (admin role required)
+ */
+router.route('/webhooks/:id/reactivate')
+  .post(requireRole('admin'), validateBody(emptyBodySchema), adminReactivateWebhook)
+  .all(methodNotAllowed(['POST']));
+
+/**
  * POST /api/admin/ip-allowlist
  *
  * Manually set an IP's reputation score.
@@ -884,5 +902,14 @@ router.route('/fees/config')
  * @response 200 { success: true, dryRun: true, data: RetentionResult[] }
  */
 router.get('/retention/dry-run', requireRole('admin'), getRetentionDryRun);
+
+/**
+ * GET /api/admin/encryption/status
+ * Ciphertext counts per encryption key id for scout notes and webhook secrets
+ * (#1513). A key can be retired once its count is 0 everywhere.
+ * @response 200 { success: true, data: { notes, webhook } }
+ * @auth Bearer (admin role required)
+ */
+router.get('/encryption/status', requireRole('admin'), getEncryptionStatusEndpoint);
 
 export default router;

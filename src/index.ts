@@ -29,6 +29,7 @@ import {
 } from "./middleware/metrics";
 import { drainAllSessions, setAcceptingSseSessions } from "./routes/events";
 import { startRetentionJob, stopRetentionJob } from './services/retention';
+import { startFieldReencryptionJob, stopFieldReencryptionJob } from './services/fieldReencryptionJob';
 import { applyHttpTimeouts } from "./httpServer";
 import { runShutdown } from "./shutdown";
 
@@ -85,6 +86,7 @@ async function start() {
   }
 
   startRetentionJob();
+  startFieldReencryptionJob();
   await startServer();
 }
 
@@ -279,6 +281,7 @@ async function startServer() {
         clearInterval(divergenceInterval);
         clearInterval(auditVerifyInterval);
         void stopRetentionJob();
+        stopFieldReencryptionJob();
       },
       getInFlightJobs: () => inFlightJobs,
       drainSse: drainAllSessions,

@@ -1,6 +1,7 @@
 import dotenv from 'dotenv';
 import path from 'path';
 import { parseRetentionPolicies } from './retentionPolicy';
+import { parseKeyring } from './utils/keyring';
 import envConstants from './config/env-constants.json';
 
 // In production and staging, configuration must come only from the
@@ -231,7 +232,21 @@ if (!apiKeyLookupSecretValue) {
 // Validate NOTES_ENCRYPTION_KEY (#1328). Scout private notes are encrypted at
 // rest with this symmetric key; production refuses to start without it.
 const notesEncryptionKeyValue = process.env.NOTES_ENCRYPTION_KEY ?? '';
-if (!notesEncryptionKeyValue) {
+// A keyring (#1513) replaces the single key; parseKeyring throws a clear error
+// when the active key id is missing from it or an entry is malformed.
+parseKeyring(
+  process.env.NOTES_ENCRYPTION_KEYS ?? '',
+  process.env.NOTES_ENCRYPTION_ACTIVE_KEY_ID ?? '',
+  'NOTES_ENCRYPTION_KEYS',
+  'NOTES_ENCRYPTION_ACTIVE_KEY_ID',
+);
+parseKeyring(
+  process.env.WEBHOOK_SECRET_ENCRYPTION_KEYS ?? '',
+  process.env.WEBHOOK_SECRET_ENCRYPTION_ACTIVE_KEY_ID ?? '',
+  'WEBHOOK_SECRET_ENCRYPTION_KEYS',
+  'WEBHOOK_SECRET_ENCRYPTION_ACTIVE_KEY_ID',
+);
+if (!notesEncryptionKeyValue && !(process.env.NOTES_ENCRYPTION_KEYS ?? '').trim()) {
   if (nodeEnv === 'production') {
     throw new Error(
       'NOTES_ENCRYPTION_KEY is required in production but is not set. ' +
@@ -592,6 +607,10 @@ const config = {
      * indefinitely.
      */
     timeoutMs: parseNumericEnv('WEBHOOK_TIMEOUT_MS', process.env.WEBHOOK_TIMEOUT_MS, 10000, { min: 1, integer: true }),
+    /** Consecutive failed deliveries before a subscription is suspended (#1512). */
+    suspendAfterFailures: parseNumericEnv('WEBHOOK_SUSPEND_AFTER_FAILURES', process.env.WEBHOOK_SUSPEND_AFTER_FAILURES, 50, { min: 1, integer: true }),
+    /** Failures spanning longer than this (ms) also suspend a subscription (#1512). */
+    suspendAfterMs: parseNumericEnv('WEBHOOK_SUSPEND_AFTER_MS', process.env.WEBHOOK_SUSPEND_AFTER_MS, 86400000, { min: 1000, integer: true }),
   },
   /**
    * Dead-letter queue alerting (#1131).
@@ -628,6 +647,14 @@ const config = {
   // Symmetric key (32-byte hex) for scout_player_notes* content at rest (#1328).
   notesEncryptionKey: process.env.NOTES_ENCRYPTION_KEY ?? '',
   notesEncryptionKeyPrevious: process.env.NOTES_ENCRYPTION_KEY_PREVIOUS ?? '',
+  // Keyrings with key ids for online rotation (#1513). Validated at startup below.
+  notesEncryptionKeys: process.env.NOTES_ENCRYPTION_KEYS ?? '',
+  notesEncryptionActiveKeyId: process.env.NOTES_ENCRYPTION_ACTIVE_KEY_ID ?? '',
+  webhookSecretEncryptionKeys: process.env.WEBHOOK_SECRET_ENCRYPTION_KEYS ?? '',
+  webhookSecretEncryptionActiveKeyId: process.env.WEBHOOK_SECRET_ENCRYPTION_ACTIVE_KEY_ID ?? '',
+  // Online re-encryption job (#1513): rows per batch and pause between batches.
+  encryptionReencryptBatchSize: parseNumericEnv('ENCRYPTION_REENCRYPT_BATCH_SIZE', process.env.ENCRYPTION_REENCRYPT_BATCH_SIZE, 100, { min: 1, max: 5000, integer: true }),
+  encryptionReencryptIntervalMs: parseNumericEnv('ENCRYPTION_REENCRYPT_INTERVAL_MS', process.env.ENCRYPTION_REENCRYPT_INTERVAL_MS, 1000, { min: 10, max: 3600000, integer: true }),
   rateLimit: {
     enabled: process.env.RATE_LIMIT_ENABLED !== 'false',
     windowMs: parseNumericEnv('RATE_LIMIT_WINDOW_MS', process.env.RATE_LIMIT_WINDOW_MS, 60000, { min: 1, integer: true }),
@@ -972,6 +999,11 @@ const config = {
     default: {
       failureThreshold: parseNumericEnv('CIRCUIT_BREAKER_FAILURE_THRESHOLD', process.env.CIRCUIT_BREAKER_FAILURE_THRESHOLD, 5, { min: 1, integer: true }),
       resetTimeoutMs: parseNumericEnv('CIRCUIT_BREAKER_RESET_TIMEOUT_MS', process.env.CIRCUIT_BREAKER_RESET_TIMEOUT_MS, 30000, { min: 1000, integer: true }),
+    },
+    /** Per-webhook-subscription breaker, keyed by subscription id (#1512). */
+    webhook: {
+      failureThreshold: parseNumericEnv('WEBHOOK_BREAKER_FAILURE_THRESHOLD', process.env.WEBHOOK_BREAKER_FAILURE_THRESHOLD, 5, { min: 1, integer: true }),
+      resetTimeoutMs: parseNumericEnv('WEBHOOK_BREAKER_RESET_TIMEOUT_MS', process.env.WEBHOOK_BREAKER_RESET_TIMEOUT_MS, 60000, { min: 1000, integer: true }),
     },
     /** IPFS / Pinata pinning breaker (often tuned tighter than the generic one). */
     ipfs: {
