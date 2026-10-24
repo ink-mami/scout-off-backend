@@ -54,6 +54,7 @@ import {
   deleteWebhook,
   testWebhook,
   registerWebhookSchema,
+  reactivateWebhook,
 } from '../controllers/webhookSubscriptionController';
 import { requireFeatureFlag } from '../middleware/requireFeatureFlag';
 import { FeatureFlags } from '../services/featureFlags';
@@ -773,6 +774,24 @@ router.route('/:wallet/webhooks/:id')
  */
 router.route('/:wallet/webhooks/:id/test')
   .post(requireRole('scout'), requireWalletOwner(), requireApiKeyScope('write:webhooks'), webhookTestRateLimit, validateBody(emptyBodySchema), testWebhook)
+  .all(methodNotAllowed(['POST']));
+
+/**
+ * POST /api/scouts/:wallet/webhooks/:id/reactivate
+ * Reactivate a suspended webhook subscription (#1512). A test ping is sent
+ * first and the subscription is reactivated only if it succeeds. Shares the
+ * webhook-test rate limit because it also issues an outbound request.
+ *
+ * @param wallet {string} - Scout's Stellar public key
+ * @param id {integer} - Webhook subscription row ID
+ * @response 200 { success: true, data: { id, url, status: 'active' } }
+ * @response 403 { success: false, error: string } - Wallet mismatch or subscription belongs to another scout
+ * @response 404 { success: false, error: string } - Subscription not found
+ * @response 502 { success: false, error: string } - Test ping failed; subscription stays suspended
+ * @auth Bearer (scout role required; wallet must match authenticated account)
+ */
+router.route('/:wallet/webhooks/:id/reactivate')
+  .post(requireRole('scout'), requireWalletOwner(), requireApiKeyScope('write:webhooks'), webhookTestRateLimit, validateBody(emptyBodySchema), reactivateWebhook)
   .all(methodNotAllowed(['POST']));
 
 /**

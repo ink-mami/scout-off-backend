@@ -261,6 +261,42 @@ NOTES_ENCRYPTION_KEY=<new> NOTES_ENCRYPTION_KEY_PREVIOUS=<old> npm run reencrypt
 
 4. After all rows decrypt with the primary key alone, remove `NOTES_ENCRYPTION_KEY_PREVIOUS`.
 
+### Online rotation with a keyring (#1513)
+
+Notes and webhook signing secrets can use a keyring of N keys instead of the
+single key + `_PREVIOUS` pair. New ciphertexts are written as
+`v2:<keyId>:<iv>:<tag>:<ciphertext>`; legacy `v1:` values keep decrypting.
+
+| Purpose | Keyring | Active key id |
+| ------- | ------- | ------------- |
+| Scout notes | `NOTES_ENCRYPTION_KEYS='k2026a:<base64>,k2025b:<base64>'` | `NOTES_ENCRYPTION_ACTIVE_KEY_ID=k2026a` |
+| Webhook secrets | `WEBHOOK_SECRET_ENCRYPTION_KEYS='...'` | `WEBHOOK_SECRET_ENCRYPTION_ACTIVE_KEY_ID=...` |
+
+Keys are 32 bytes, base64 (`openssl rand -base64 32`); key ids match
+`[A-Za-z0-9-]{1,32}` and must be unique. Startup fails with a clear message if
+an entry is malformed or the active id is not in the keyring.
+
+Rotation procedure (no downtime, no offline script):
+
+1. Generate a key and add it to `*_ENCRYPTION_KEYS` under a new id. Keep every
+   existing key in the ring.
+2. Set `*_ENCRYPTION_ACTIVE_KEY_ID` to the new id and deploy. New writes use it.
+3. The background job (`src/services/fieldReencryptionJob.ts`) re-encrypts every
+   row not on the active key (including legacy `v1:` and plaintext rows) in
+   batches of `ENCRYPTION_REENCRYPT_BATCH_SIZE`, pausing
+   `ENCRYPTION_REENCRYPT_INTERVAL_MS` between batches. Each update is
+   `WHERE id = ? AND <column> = <old ciphertext>`, so a concurrent application
+   write is never overwritten; the row is retried on a later pass. The job is
+   resumable — progress is simply "rows not on the active key".
+4. Watch `GET /api/admin/encryption/status` (admin only). It returns, per table
+   and column, row counts per key id plus `v1`, `plaintext` and `unknown`.
+5. Retire an old key only once its count is `0` in every table for that purpose
+   (and `unknown`/`v1`/`plaintext` are `0`). Then remove it from the ring.
+
+Never log key material or plaintext; the job logs ids and counts only.
+`scripts/reencrypt-notes.js` uses the same `encryptField`/`decryptField` code
+path and therefore also targets the active key; the online job is preferred.
+
 ---
 
 ## Known Gaps and Limitations

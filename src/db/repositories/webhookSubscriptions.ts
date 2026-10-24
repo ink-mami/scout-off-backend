@@ -28,7 +28,17 @@ export interface WebhookSubscription {
   created_at: string;
   previous_secret?: string | null;
   previous_secret_expires_at?: string | null;
+  // Endpoint health (#1512, migration 038). Timestamps are epoch ms.
+  consecutive_failures?: number;
+  failing_since?: number | null;
+  last_failure_at?: number | null;
+  last_success_at?: number | null;
+  status?: WebhookSubscriptionStatus;
+  suspended_at?: number | null;
+  suspended_reason?: string | null;
 }
+
+export type WebhookSubscriptionStatus = 'active' | 'degraded' | 'suspended';
 
 export function createWebhookSubscription(
   url: string,
@@ -182,4 +192,80 @@ export function clearWebhookSubscriptionPreviousSecret(id: number): void {
     SET previous_secret = NULL, previous_secret_expires_at = NULL
     WHERE id = ?`;
   timedQuery(sql, () => getDb().prepare(sql).run(id));
+}
+
+
+// ─── Endpoint health (#1512) ─────────────────────────────────────────────────
+
+/** Record a successful delivery: clears the failure streak and degraded status. */
+export function recordWebhookSubscriptionSuccess(id: number, now = Date.now()): void {
+  const sql = `UPDATE webhook_subscriptions
+    SET consecutive_failures = 0, failing_since = NULL, last_success_at = ?,
+        status = CASE WHEN status = 'suspended' THEN status ELSE 'active' END
+    WHERE id = ?`;
+  timedQuery(sql, () => getDb().prepare(sql).run(now, id));
+}
+
+/**
+ * Record a failed delivery and, when the streak or its time span crosses the
+ * thresholds, suspend the subscription atomically. Returns the updated row, or
+ * undefined if the subscription no longer exists.
+ */
+export function recordWebhookSubscriptionFailure(
+  id: number,
+  limits: { maxFailures: number; maxSpanMs: number; minFailuresForSpan: number },
+  now = Date.now(),
+): { row: WebhookSubscription; justSuspended: boolean } | undefined {
+  return timedQuery('webhook_subscriptions health failure', () => {
+    const tx = getDb().transaction(() => {
+      const db = getDb();
+      db.prepare(
+        `UPDATE webhook_subscriptions
+         SET consecutive_failures = consecutive_failures + 1,
+             failing_since = COALESCE(failing_since, ?), last_failure_at = ?,
+             status = CASE WHEN status = 'suspended' THEN status ELSE 'degraded' END
+         WHERE id = ?`,
+      ).run(now, now, id);
+      const row = db.prepare('SELECT * FROM webhook_subscriptions WHERE id = ?').get(id) as
+        | WebhookSubscription
+        | undefined;
+      if (!row) return undefined;
+
+      const streak = row.consecutive_failures ?? 0;
+      const spanMs = now - (row.failing_since ?? now);
+      let reason: string | null = null;
+      if (streak >= limits.maxFailures) reason = `${streak} consecutive failures`;
+      else if (streak >= limits.minFailuresForSpan && spanMs > limits.maxSpanMs) {
+        reason = `failing for ${Math.round(spanMs / 3_600_000)}h (${streak} consecutive failures)`;
+      }
+      if (reason && row.status !== 'suspended') {
+        db.prepare(
+          `UPDATE webhook_subscriptions SET status = 'suspended', suspended_at = ?, suspended_reason = ? WHERE id = ?`,
+        ).run(now, reason, id);
+        return { row: { ...row, status: 'suspended' as const, suspended_at: now, suspended_reason: reason }, justSuspended: true };
+      }
+      return { row, justSuspended: false };
+    });
+    return tx();
+  });
+}
+
+/** Return a suspended/degraded subscription to `active` with a clean health record. */
+export function reactivateWebhookSubscription(id: number, now = Date.now()): boolean {
+  const sql = `UPDATE webhook_subscriptions
+    SET status = 'active', consecutive_failures = 0, failing_since = NULL,
+        suspended_at = NULL, suspended_reason = NULL, last_success_at = ?
+    WHERE id = ?`;
+  return timedQuery(sql, () => getDb().prepare(sql).run(now, id).changes > 0);
+}
+
+export function countWebhookSubscriptionsByStatus(): Record<WebhookSubscriptionStatus, number> {
+  const sql = 'SELECT status, COUNT(*) AS count FROM webhook_subscriptions GROUP BY status';
+  return timedQuery(sql, () => {
+    const counts: Record<WebhookSubscriptionStatus, number> = { active: 0, degraded: 0, suspended: 0 };
+    for (const r of getDb().prepare(sql).all() as Array<{ status: WebhookSubscriptionStatus; count: number }>) {
+      counts[r.status] = r.count;
+    }
+    return counts;
+  });
 }

@@ -750,6 +750,29 @@
         ]
       }
     },
+    "/admin/encryption/status": {
+      "get": {
+        "tags": [
+          "admin"
+        ],
+        "summary": "Ciphertext counts per encryption key id for scout notes and webhook secrets (#1513).",
+        "operationId": "getEncryptionStatusEndpoint",
+        "description": "Ciphertext counts per encryption key id for scout notes and webhook secrets\n(#1513). A key can be retired once its count is 0 everywhere.",
+        "responses": {
+          "200": {
+            "description": "{ success: true, data: { notes, webhook } }"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "x-required-role": [
+          "admin"
+        ]
+      }
+    },
     "/admin/events": {
       "get": {
         "tags": [
@@ -1257,6 +1280,107 @@
           },
           "400": {
             "description": "{ success: false, error: string } - Invalid fromLedger"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "x-required-role": [
+          "admin"
+        ]
+      }
+    },
+    "/admin/indexer/unprocessed": {
+      "get": {
+        "tags": [
+          "admin"
+        ],
+        "summary": "List contract events the indexer could not apply.",
+        "operationId": "listUnprocessed",
+        "description": "Paginated list of contract events the indexer could not apply (unknown topic\nor decode failure), newest first. Each row carries the raw topic/value XDR\nneeded to replay the event once the decoder is fixed.",
+        "parameters": [
+          {
+            "name": "page",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "default": 1
+            },
+            "description": "1-based page number (default 1)"
+          },
+          {
+            "name": "pageSize",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 100,
+              "default": 20
+            },
+            "description": "Page size, 1-100 (default 20)"
+          },
+          {
+            "name": "reason",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "unknown_type",
+                "decode_error"
+              ]
+            },
+            "description": "Optional filter by failure reason"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "{ success: true, data: UnprocessedEvent[], total, page, pageSize }"
+          },
+          "400": {
+            "description": "{ success: false, error: string } - Invalid query parameters"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "x-required-role": [
+          "admin"
+        ]
+      }
+    },
+    "/admin/indexer/unprocessed/{id}/retry": {
+      "post": {
+        "tags": [
+          "admin"
+        ],
+        "summary": "Replay a stored unprocessed event after a decoder fix.",
+        "operationId": "retryUnprocessed",
+        "description": "Reruns the indexer's apply path for a stored unprocessed event after a\ndecoder fix. On success the unprocessed row is removed; on failure it is\nkept and the failure detail is returned.",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "number"
+            },
+            "description": "Id of the stored unprocessed event"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "{ success: true, data: { id, status, detail } }"
+          },
+          "404": {
+            "description": "{ success: false, error: string } - Unknown id"
           }
         },
         "security": [
@@ -2213,6 +2337,58 @@
         "responses": {
           "200": {
             "description": "{ success: true, data: WebhookDeliveryRow[], total, limit, offset }"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "x-required-role": [
+          "admin"
+        ]
+      }
+    },
+    "/admin/webhooks/{id}/reactivate": {
+      "post": {
+        "tags": [
+          "admin"
+        ],
+        "summary": "Reactivate a suspended webhook subscription (#1512).",
+        "operationId": "adminReactivateWebhook",
+        "description": "Reactivate a suspended webhook subscription (#1512). Sends a test ping first\nand reactivates only if it succeeds.",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer"
+            },
+            "description": "Webhook subscription row ID"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {},
+                "additionalProperties": false
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "{ success: true, data: { id, url, status: 'active' } }"
+          },
+          "404": {
+            "description": "{ success: false, error: string } - Subscription not found"
+          },
+          "502": {
+            "description": "{ success: false, error: string } - Test ping failed"
           }
         },
         "security": [
@@ -3359,7 +3535,7 @@
         ],
         "summary": "Return the list of token holders and their balances for the given player.",
         "operationId": "getPlayerTokenHolders",
-        "description": "Return the list of token holders and their balances for the given player.\nGated by the `player_tokens` feature flag — returns 404 when disabled.",
+        "description": "Return the list of token holders and their balances for the given player.\nGated by the `player_tokens_enabled` feature flag — returns 404 when disabled.",
         "parameters": [
           {
             "name": "playerId",
@@ -3394,7 +3570,7 @@
         ],
         "summary": "Purchase Player Tokens for a given player.",
         "operationId": "buyPlayerToken",
-        "description": "Purchase Player Tokens for a given player. Purchases are persisted in the\ndatabase, but this stub does not perform an XLM transfer.\nGated by the `player_tokens` feature flag — returns 404 when disabled.\nThe authenticated scout account is the buyer; the optional buyerWallet field\nis accepted only when it matches that account.",
+        "description": "Purchase Player Tokens for a given player. Purchases are persisted in the\ndatabase, but this stub does not perform an XLM transfer.\nGated by the `player_tokens_enabled` feature flag — returns 404 when disabled.\nThe authenticated scout account is the buyer; the optional buyerWallet field\nis accepted only when it matches that account.",
         "parameters": [
           {
             "name": "playerId",
@@ -6070,6 +6246,77 @@
           },
           "404": {
             "description": "{ success: false, error: string } - Subscription not found"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          },
+          {
+            "apiKeyAuth": [
+              "write:webhooks"
+            ]
+          }
+        ],
+        "x-required-role": [
+          "scout"
+        ],
+        "x-api-key-scope": "write:webhooks",
+        "x-owner-only": true
+      }
+    },
+    "/scouts/{wallet}/webhooks/{id}/reactivate": {
+      "post": {
+        "tags": [
+          "scouts"
+        ],
+        "summary": "Reactivate a suspended webhook subscription (#1512).",
+        "operationId": "reactivateWebhook",
+        "description": "Reactivate a suspended webhook subscription (#1512). A test ping is sent\nfirst and the subscription is reactivated only if it succeeds. Shares the\nwebhook-test rate limit because it also issues an outbound request.",
+        "parameters": [
+          {
+            "name": "wallet",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Scout's Stellar public key"
+          },
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer"
+            },
+            "description": "Webhook subscription row ID"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {},
+                "additionalProperties": false
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "{ success: true, data: { id, url, status: 'active' } }"
+          },
+          "403": {
+            "description": "{ success: false, error: string } - Wallet mismatch or subscription belongs to another scout"
+          },
+          "404": {
+            "description": "{ success: false, error: string } - Subscription not found"
+          },
+          "502": {
+            "description": "{ success: false, error: string } - Test ping failed; subscription stays suspended"
           }
         },
         "security": [

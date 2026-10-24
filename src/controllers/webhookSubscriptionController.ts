@@ -22,6 +22,7 @@ import {
 } from '../db';
 import { decryptWebhookSecret } from '../utils/webhookSecretCipher';
 import { signWebhookPayload, buildSignatureHeader } from '../services/webhooks';
+import { reactivateAfterPing } from '../services/webhookHealth';
 import { sendForbidden } from '../utils/authError';
 import { logger } from '../utils/logger';
 import type { ContractEventType } from '../types';
@@ -66,7 +67,19 @@ function maskSecret(plaintext: string): string {
 }
 
 function serializeSubscription(
-  row: { id: number; url: string; secret: string; event_types: string | null; created_at: string },
+  row: {
+    id: number;
+    url: string;
+    secret: string;
+    event_types: string | null;
+    created_at: string;
+    status?: string;
+    consecutive_failures?: number;
+    last_failure_at?: number | null;
+    last_success_at?: number | null;
+    suspended_at?: number | null;
+    suspended_reason?: string | null;
+  },
   opts: { revealSecret?: boolean } = {},
 ) {
   const plaintext = decryptWebhookSecret(row.secret);
@@ -76,6 +89,12 @@ function serializeSubscription(
     secret: opts.revealSecret ? plaintext : maskSecret(plaintext),
     eventTypes: row.event_types ? (JSON.parse(row.event_types) as string[]) : null,
     createdAt: row.created_at,
+    status: row.status ?? 'active',
+    consecutiveFailures: row.consecutive_failures ?? 0,
+    lastFailureAt: row.last_failure_at ?? null,
+    lastSuccessAt: row.last_success_at ?? null,
+    suspendedAt: row.suspended_at ?? null,
+    suspendedReason: row.suspended_reason ?? null,
   };
 }
 
@@ -153,7 +172,7 @@ export async function registerWebhook(
  * List all webhook subscriptions for the authenticated scout.
  * Secrets are masked — only the last 4 hex chars are visible.
  *
- * @response 200 { success: true, data: Array<{ id, url, secret (masked), eventTypes, createdAt }> }
+ * @response 200 { success: true, data: Array<{ id, url, secret (masked), eventTypes, createdAt, status, consecutiveFailures, lastFailureAt, lastSuccessAt, suspendedAt, suspendedReason }> }
  * @response 403 Wallet mismatch
  * @auth Bearer (scout role required; wallet must match authenticated account)
  */
@@ -287,4 +306,66 @@ try {
   } catch (err) {
     next(err);
   }
+}
+
+/**
+ * Reactivate a suspended subscription after a successful test ping. Shared by
+ * the owner and admin routes; `ownerWallet` is enforced only for the owner route.
+ */
+async function reactivate(
+  req: Request,
+  res: Response,
+  next: NextFunction,
+  ownerWallet: string | null,
+): Promise<void> {
+  try {
+    const id = parseInt(req.params.id as string, 10);
+    if (isNaN(id)) {
+      res.status(400).json({ success: false, error: 'Invalid subscription id' });
+      return;
+    }
+    const row = getWebhookSubscriptionById(id);
+    if (!row) {
+      res.status(404).json({ success: false, error: 'Webhook subscription not found' });
+      return;
+    }
+    if (ownerWallet !== null && row.scout_wallet !== ownerWallet) {
+      sendForbidden(res, 'Forbidden: subscription belongs to another scout');
+      return;
+    }
+
+    const actor = ownerWallet ?? (req.account as string | undefined) ?? 'admin';
+    const result = await reactivateAfterPing({ ...row, secret: decryptWebhookSecret(row.secret) }, actor);
+    if (!result.ok) {
+      res.status(502).json({ success: false, error: result.error, data: { id, url: row.url } });
+      return;
+    }
+    res.json({ success: true, data: { id, url: row.url, status: 'active' } });
+  } catch (err) {
+    next(err);
+  }
+}
+
+/**
+ * POST /api/scouts/:wallet/webhooks/:id/reactivate
+ *
+ * Reactivate a suspended subscription. A test ping is sent first; the
+ * subscription is reactivated only if it succeeds.
+ *
+ * @response 200 { success: true, data: { id, url, status: 'active' } }
+ * @response 403 Wallet mismatch or subscription belongs to another scout
+ * @response 404 Subscription not found
+ * @response 502 Test ping failed; subscription stays suspended
+ * @auth Bearer (scout role required; wallet must match authenticated account)
+ */
+export async function reactivateWebhook(req: Request, res: Response, next: NextFunction): Promise<void> {
+  return reactivate(req, res, next, req.params.wallet as string);
+}
+
+/**
+ * POST /api/admin/webhooks/:id/reactivate
+ * Admin equivalent of {@link reactivateWebhook} (no ownership check).
+ */
+export async function adminReactivateWebhook(req: Request, res: Response, next: NextFunction): Promise<void> {
+  return reactivate(req, res, next, null);
 }

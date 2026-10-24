@@ -6,18 +6,16 @@ They are stored in the `feature_flags` table, defined in
 through the admin API.
 
 > Keep this doc in sync with `FeatureFlags` in `src/services/featureFlags.ts`
-> and the seed migrations. In particular, update it when the
-> `player_tokens` / `player_tokens_enabled` naming issue is fixed.
+> and the seed migrations.
 
 ## Flags
 
 | Flag | Gates | Default | Where it's checked |
 | ---- | ----- | ------- | ------------------ |
 | `saved_searches` | Scout saved-search endpoints: `GET/POST /api/scouts/:wallet/saved-searches`, `PUT/DELETE /api/scouts/:wallet/saved-searches/:id`, `GET /api/scouts/:wallet/saved-searches/:id/run` | **on** (seeded `1` by `db/010_feature_flags.sql`) | `requireFeatureFlag(FeatureFlags.SAVED_SEARCHES)` in `src/routes/scout.ts` |
-| `player_tokens` | Player token endpoints: `GET /api/players/:playerId/tokens`, `POST /api/players/:playerId/tokens/buy` | off (no seed row, so it reads as disabled) | `featureFlagGuard()` in `src/controllers/playerTokenController.ts` (direct `isFeatureEnabled` call). See caveats. |
-| `player_tokens_enabled` | Nothing yet. Seeded as the intended player-token flag. | off (seeded `0` by `db/020_feature_flags_seed.sql`) | Not checked anywhere. See caveats. |
+| `player_tokens_enabled` | Player token endpoints: `GET /api/players/:playerId/tokens`, `POST /api/players/:playerId/tokens/buy` | off (seeded `0` by `db/020_feature_flags_seed.sql`; legacy `player_tokens` rows are migrated by `db/037_player_tokens_flag_rename.sql`) | `featureFlagGuard()` in `src/controllers/playerTokenController.ts` (awaited `isFeatureEnabled`) |
 | `saved_search_alerts_enabled` | Nothing yet. Reserved for saved-search alerts. | off (seeded `0` by `db/020_feature_flags_seed.sql`) | Not checked anywhere (tracked separately). |
-| `graphql_enabled` | The `/graphql` endpoint. Requests 404 while it is off (#1126). | off (seeded `0`; also `false` in `FLAG_DEFAULTS`) | Synchronous `isEnabled(GRAPHQL_ENABLED)` in the mount guard in `src/graphql/index.ts` |
+| `graphql_enabled` | The `/graphql` endpoint. Requests 404 while it is off (#1126). | off (seeded `0`; also `false` in `FLAG_DEFAULTS`) | Cached async `isFeatureEnabled(GRAPHQL_ENABLED)` in the mount guard in `src/graphql/index.ts` |
 
 A disabled flag checked by `requireFeatureFlag` returns:
 
@@ -29,16 +27,6 @@ with status `404`, so a disabled feature looks the same as a missing route.
 
 ### Known caveats
 
-- **`player_tokens` vs `player_tokens_enabled`.** The code checks
-  `player_tokens`, but migration 020 seeds `player_tokens_enabled`. Toggling
-  `player_tokens_enabled` has no effect. Toggling `player_tokens` returns 404
-  from `PUT /api/admin/feature-flags/:name` until a row exists; create it with
-  `PUT /api/admin/feature-flags` (body `{ "name": "player_tokens", "enabled": true }`).
-  This mismatch is tracked separately.
-- **The player-token guard isn't awaited.** `featureFlagGuard()` calls the async
-  `isFeatureEnabled()` without `await`. A Promise is always truthy, so the guard
-  never blocks and the player-token endpoints are reachable whatever the flag
-  says. Don't rely on `player_tokens` to hide these endpoints until this is fixed.
 - **`saved_search_alerts_enabled` gates nothing.** No code reads it yet, so
   toggling it changes nothing.
 
@@ -85,7 +73,7 @@ There are two read paths, each with its own in-process cache:
 With several replicas, a toggle takes effect at once on the replica that served
 the `PUT`, within `FEATURE_FLAG_CACHE_TTL_MS` for `graphql_enabled` everywhere,
 and **only after a restart** on other replicas for flags read through
-`isFeatureEnabled()`. After toggling `saved_searches` or `player_tokens` in a
+`isFeatureEnabled()`. After toggling `saved_searches` or `player_tokens_enabled` in a
 multi-replica deployment, do a rolling restart.
 
 **Postgres caveat.** `isEnabled()` reads through the better-sqlite3 handle.
